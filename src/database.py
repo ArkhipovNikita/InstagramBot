@@ -54,6 +54,8 @@ class Database:
         self.passed_users_count += 1
         self.execute("SELECT * FROM instagram_users LIMIT 1 OFFSET %s;" % self.passed_users_count)
         result = self.cursor.fetchone()
+        if result is None:
+            return ''
         # Assign new user's id
         self.curr_user_id = result[0]
         return result[1]

@@ -1,11 +1,12 @@
 import os
+import re
 import time
 import urllib.parse
+import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
-from src.database import Database
 
 
 class InstagramBot:
@@ -17,9 +18,9 @@ class InstagramBot:
     and who tagged whom.
     """
     url = 'https://www.instagram.com/'
-    user_quantity = 1
+    user_visiting_amount = 3
 
-    def __init__(self, username, password, start_username, db: Database):
+    def __init__(self, username, password, start_username, db):
         self.username = username
         self.password = password
         self.start_username = start_username
@@ -73,22 +74,6 @@ class InstagramBot:
         except Exception as ex:
             return
 
-    def scroll(self):
-        """
-        Scroll page up to the end (last photo)
-        """
-        old_page_height = self.driver.execute_script('return document.documentElement.scrollTop')
-        step = 600
-        scroll_to = step
-        while True:
-            self.driver.execute_script('document.documentElement.scrollTo(0, %s);' % scroll_to)
-            time.sleep(1)
-            scroll_to += step
-            new_page_height = self.driver.execute_script('return document.documentElement.scrollTop')
-            if new_page_height == old_page_height:
-                break
-            old_page_height = new_page_height
-
     @staticmethod
     def contains_photos(photo_grid):
         """
@@ -112,43 +97,100 @@ class InstagramBot:
         except Exception as ex:
             return True
 
-    def get_list_usernames(self, photo_grid):
-        """
-        Return a set of usernames who tagged photos in given photo grid (box)
-        """
-        usernames = set()
-        photo_divs = photo_grid.find_elements_by_css_selector('div.v1Nh3.kIKUG._bz0w')
-        photo_urls = [photo_div.find_element_by_tag_name('a').get_attribute('href') for photo_div in photo_divs]
-        for photo_url in photo_urls:
-            self.driver.get(self.get_photo_url(photo_url))
-            username = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'a.sqdOP.yWX7d._8A5w5.ZIAjV'))
-            ).text
-            usernames.add(username)
-        return usernames
-
     def run(self):
         """
         Launch program
         """
         self.login()
         current_username = self.start_username
-        while self.db.passed_users_count != self.user_quantity:
+        # until the current user doesn't exist and
+        # unless the necessary quantity of users passes
+        while self.db.passed_users_count != self.user_visiting_amount and current_username:
             self.driver.get(self.get_tagged_url(current_username))
             # wait 10 sec until grid with photos appears
             photo_grid = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'div._2z6nI'))
-                )
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'div._2z6nI'))
+            )
             # if profile doesn't contain any tagged photo then continue
             if not self.contains_photos(photo_grid):
                 continue
-            self.scroll()
-            # get grid with all loaded photos
-            photo_grid = self.driver.find_element_by_css_selector('div._2z6nI')
-            usernames = self.get_list_usernames(photo_grid)
+            usernames = self.get_list_usernames()
             self.db.add_tagging_users(usernames)
             current_username = self.db.get_next_user()
+            time.sleep(1)
         self.quit()
+
+    def get_list_usernames(self):
+        """
+        Return a set of usernames who tagged a user in the current page
+        """
+        usernames = set()
+        # 'tokens' that are necessary for getting info
+        query_hash = self.get_query_hash(self.driver.find_elements_by_xpath("//head/script[@type='text/javascript']"))
+        user_id = self.get_user_id(self.driver.find_elements_by_xpath("//body/script[@type='text/javascript']"))
+        print('query_hash: %s, user_id: %s' % (query_hash, user_id))
+        url_pattern = ('https://www.instagram.com/graphql/query/?query_hash={0}&variables=%7B%22id%22%3A%22{'
+                       '1}%22%2C%22first%22%3A12%').format(query_hash, user_id)
+        first_query_url = url_pattern + '7D'
+        others_queries_url_pattern = url_pattern + '2C%22after%22%3A%22{0}%3D%3D%22%7D'
+        query_url = first_query_url
+        while True:
+            response = requests.get(query_url).json()
+            edge = response['data']['user']['edge_user_to_photos_of_you']
+            page_info = edge['page_info']
+            has_next_page = page_info['has_next_page']
+            after = page_info['end_cursor']
+            usernames = usernames.union(self.retrieve_usernames_from_json(edge['edges']))
+            if not has_next_page:
+                break
+            query_url = others_queries_url_pattern.format(after[:-2])
+            time.sleep(1)
+        return usernames
+
+    def retrieve_usernames_from_json(self, edges):
+        """
+        Get all usernames contained in response
+        :param edges: key of json where information
+        about photos is located
+        """
+        usernames = set()
+        for e in edges:
+            usernames.add(e['node']['owner']['username'])
+        return usernames
+
+    def get_query_hash(self, scripts):
+        """
+        Get query hash
+        :param scripts: scripts located in <head>
+        """
+        # try to find necessary src straight off with beautiful soup
+        script = [sp for sp in scripts if 'ProfilePageContainer' in sp.get_attribute('src')][0]
+        script_url = urllib.parse.urljoin(self.url, script.get_attribute('src'))
+        headers = {'user-agent': self.driver.execute_script('return navigator.userAgent;')}
+        response = requests.get(script_url, headers=headers).text
+        for i, res in enumerate(re.finditer('queryId:"\w*"', response)):
+            if i == 1:
+                match = res.group()
+                query_hash = re.search('"(\w*)"', match).group()[1:-1]
+                return query_hash
+        raise Exception("Query hash wasn't found")
+
+    def get_user_id(self, scripts):
+        """
+        Get user id
+        :param scripts: scripts located in <body>
+        """
+        try:
+            match = ''
+            for sp in scripts:
+                text = sp.get_attribute('innerHTML')
+                if 'window._sharedData' in text:
+                    match = text
+                    break
+            match = re.search('"owner":{"id":"\d*"', match).group()
+            return re.search('"(\d*)"', match).group()[1:-1]
+        except Exception as ex:
+            raise Exception("User id wasn't found")
 
     def quit(self):
         """
