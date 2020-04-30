@@ -18,7 +18,7 @@ class InstagramBot:
     and who tagged whom.
     """
     url = 'https://www.instagram.com/'
-    user_visiting_amount = 3
+    user_visiting_amount = 150
 
     def __init__(self, username, password, start_username, db):
         self.username = username
@@ -80,7 +80,7 @@ class InstagramBot:
         Check if profile contains photos in 'tagged' section
         """
         try:
-            photo_grid.find_elements_by_tag_name('article')
+            photo_grid.find_element_by_tag_name('article')
             return True
         except Exception as ex:
             return False
@@ -111,8 +111,9 @@ class InstagramBot:
             photo_grid = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'div._2z6nI'))
             )
-            # if profile doesn't contain any tagged photo then continue
-            if not self.contains_photos(photo_grid):
+            # if profile doesn't contain any tagged photo or it's private then continue
+            if not self.contains_photos(photo_grid) or not self.is_public(photo_grid):
+                current_username = self.db.get_next_user()
                 continue
             usernames = self.get_list_usernames()
             self.db.add_tagging_users(usernames)
@@ -128,23 +129,28 @@ class InstagramBot:
         # 'tokens' that are necessary for getting info
         query_hash = self.get_query_hash(self.driver.find_elements_by_xpath("//head/script[@type='text/javascript']"))
         user_id = self.get_user_id(self.driver.find_elements_by_xpath("//body/script[@type='text/javascript']"))
-        print('query_hash: %s, user_id: %s' % (query_hash, user_id))
+        # print('query_hash: %s, user_id: %s' % (query_hash, user_id))
         url_pattern = ('https://www.instagram.com/graphql/query/?query_hash={0}&variables=%7B%22id%22%3A%22{'
                        '1}%22%2C%22first%22%3A12%').format(query_hash, user_id)
         first_query_url = url_pattern + '7D'
         others_queries_url_pattern = url_pattern + '2C%22after%22%3A%22{0}%3D%3D%22%7D'
         query_url = first_query_url
-        while True:
-            response = requests.get(query_url).json()
-            edge = response['data']['user']['edge_user_to_photos_of_you']
-            page_info = edge['page_info']
-            has_next_page = page_info['has_next_page']
-            after = page_info['end_cursor']
-            usernames = usernames.union(self.retrieve_usernames_from_json(edge['edges']))
-            if not has_next_page:
-                break
-            query_url = others_queries_url_pattern.format(after[:-2])
-            time.sleep(1)
+        # an error occurs in the response for large amount of photos
+        try:
+            while True:
+                response = requests.get(query_url).json()
+                print('new request for tagged data')
+                edge = response['data']['user']['edge_user_to_photos_of_you']
+                page_info = edge['page_info']
+                has_next_page = page_info['has_next_page']
+                after = page_info['end_cursor']
+                usernames = usernames.union(self.retrieve_usernames_from_json(edge['edges']))
+                if not has_next_page:
+                    break
+                query_url = others_queries_url_pattern.format(after[:-2])
+                time.sleep(1)
+        except Exception as ex:
+            pass
         return usernames
 
     def retrieve_usernames_from_json(self, edges):

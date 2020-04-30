@@ -4,7 +4,7 @@ class Database:
         self.conn = conn
         initial_user_id = self.add_inital_user(username)
         self.curr_user_id = initial_user_id
-        self.passed_users_count = 0
+        self.passed_users_count = 83
 
     def execute(self, command):
         """
@@ -31,15 +31,23 @@ class Database:
         When repeated do nothing.
         :param tagging_users: usernames of users that tagged current user
         """
+        if not tagging_users:
+            return
         # inserting new users into instagram_users
         command = 'INSERT INTO instagram_users (id, username) VALUES '
         values = ["(nextval('instagram_user'), '%s')" % user for user in tagging_users]
-        command += ', '.join(values) + ' ON CONFLICT (username) DO NOTHING RETURNING id;'
+        command += ', '.join(values) + ' ON CONFLICT (username) DO NOTHING;'
         self.execute(command)
 
-        # inserting new relationships into instagram_users_links
         # get assigned ids in database sequence
-        tagging_user_ids = [record[0] for record in self.cursor.fetchall()]
+        command = 'SELECT id FROM instagram_users WHERE  username in ('
+        values = ["'%s'" % user for user in tagging_users]
+        command += ','.join(values) + ');'
+        self.execute(command)
+        ids = self.cursor.fetchall()
+
+        # inserting new relationships into instagram_users_links
+        tagging_user_ids = [record[0] for record in ids]
         command = 'INSERT INTO instagram_users_links (id, from_, to_) VALUES '
         values = ["(nextval('instagram_user'), '%s', '%s')" % (tagging_user_id, self.curr_user_id)
                   for tagging_user_id in tagging_user_ids]
@@ -50,8 +58,9 @@ class Database:
         """
         Return username that was added after current one
         """
-        # Increase quantity of vidited users
+        # Increase quantity of visited users
         self.passed_users_count += 1
+        print('visited %s users' % self.passed_users_count)
         self.execute("SELECT * FROM instagram_users LIMIT 1 OFFSET %s;" % self.passed_users_count)
         result = self.cursor.fetchone()
         if result is None:
